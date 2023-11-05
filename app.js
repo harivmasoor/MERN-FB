@@ -74,7 +74,7 @@ const createEmbeddings = async (text) => {
 app.use(express.static('public'));
 
 app.post('/', upload.array('pdf', 12), async (req, res) => {
-    const client = await MongoClient.connect(MONGO_URI);
+    client = await MongoClient.connect(MONGO_URI);
     const db = client.db('fileCabinet');
     const collection = db.collection('pdfs');
 
@@ -158,128 +158,135 @@ const cosineSimilarity = (vecA, vecB) => {
     return dotProduct / (magnitudeA * magnitudeB);
 };
 
+const DATABASE_NAME = 'fileCabinet';
+
 app.post('/chat', async (req, res) => {
-    let client; // Declare client outside the try block to use it in the entire function scope
+    let client;
     try {
         const userMessage = req.body.message;
-
-        // Check and initialize chatHistory if not present
         if (!req.session.chatHistory) {
             req.session.chatHistory = [];
         }
 
         const embedding = await createEmbeddings(userMessage);
+        client = await MongoClient.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+        const db = client.db(DATABASE_NAME);
+        const pdfsCollection = db.collection('pdfs');
+        const chatHistoryCollection = db.collection('chatSessions');
 
-        // Connect to the database without re-declaring 'client'
-        client = await MongoClient.connect(MONGO_URI);
-        const db = client.db('fileCabinet');
-        const collection = db.collection('pdfs');
+        console.log(`Fetching chat history for session: ${req.session.id}`);
+        let previousMessages = await chatHistoryCollection.find({ sessionId: req.session.id })
+            .sort({ timestamp: -1 })
+            .toArray();
 
-        const documents = await collection.find({}).toArray();
-        if (documents.length === 0) {
-            return res.status(404).json({ error: 'No documents found in database' });
-        }
+        previousMessages.forEach(msg => {
+            console.log(`Fetched Prev Msg - ID: ${msg._id}, Msg: ${msg.message}, Response: ${msg.response}`);
+        });
 
-        let maxSimilarity = -Infinity;
-        let mostSimilarDocument = null;
+        const documents = await pdfsCollection.find({}).toArray();
+        const chatSessions = await chatHistoryCollection.find({}).toArray();
 
-        for (const doc of documents) {
-            if (!doc.embedding || !Array.isArray(doc.embedding) || doc.embedding.length === 0) {
-                console.warn('Skipping a document with invalid embedding:', doc.id);
-                continue; // Skip this document and go to the next one
-            }
+        let combinedContext = '';
+        let contextAndScores = []; // To store contexts and their similarity scores
+
+        documents.forEach((doc) => {
             const similarity = cosineSimilarity(embedding, doc.embedding);
-            if (similarity > maxSimilarity) {
-                maxSimilarity = similarity;
-                mostSimilarDocument = doc;
+            if (similarity > 0.8) {
+                combinedContext += doc.full_text + ' ';
+                contextAndScores.push({ text: doc.full_text, score: similarity });
             }
-        }
+        });
+        chatSessions.forEach((session) => {
+            if (session.embedding) { // Ensure there is an embedding to compare with
+                const similarity = cosineSimilarity(embedding, session.embedding);
+                console.log(`Session ID: ${session._id}, Similarity Score: ${similarity.toFixed(2)}`); // Log the ObjectID and similarity score
+                if (similarity > 0.8) { // Use your similarity threshold
+                    combinedContext += session.message + ' ';
+                    contextAndScores.push({ text: session.message, score: similarity });
+                }
+            }
+        });
         
 
-        let gptResponse = '';
-        if (mostSimilarDocument) {
-            const context = mostSimilarDocument.full_text;
-            gptResponse = await askGPT(userMessage, context, req.session.chatHistory);
-        } else {
-            gptResponse = `No matches found for '${userMessage}'. Please refine your query.`;
-        }
+        console.log("Similar contexts and scores:", contextAndScores);
 
-        req.session.chatHistory.push({
-            user: userMessage,
-            gpt: gptResponse // Ensure gptResponse is just a string
-        });
+        let gptResponse = combinedContext.length > 0
+            ? await askGPT(userMessage, combinedContext, previousMessages)
+            : `No matches found for '${userMessage}'. Please refine your query.`;
 
-        res.json({
+        const chatEntry = {
+            sessionId: req.session.id,
+            message: userMessage,
             response: gptResponse,
-            chatHistory: req.session.chatHistory
-        });
+            timestamp: new Date(),
+            embedding: embedding
+        };
+        await chatHistoryCollection.insertOne(chatEntry);
 
-        await client.close();
+        req.session.chatHistory.push({ role: 'user', message: userMessage }, { role: 'assistant', message: gptResponse });
+
+        res.json({ response: gptResponse, chatHistory: req.session.chatHistory });
+
     } catch (error) {
-        if (client) {
-            await client.close();
-        }
         console.error("Error during /chat route processing:", error);
         res.status(500).json({ error: 'An error occurred while processing your chat message.' });
+    } finally {
+        if (client) {
+            console.log("Closing MongoDB client.");
+            await client.close();
+        }
     }
 });
 
-
-
-
-// Define the askGPT function as an async function
-const askGPT = async (userMessage, context, sessionChatHistory) => {
-  // Initialize an array for storing the message history to be sent to OpenAI
-  const messages = sessionChatHistory || [];
-  // Add the user's message to the history
-  messages.push({ role: "user", content: userMessage });
-
-  // Add contextual information if available
-  if (context) {
-    messages.push({ role: "system", content: `Here's a matched document excerpt: ${context}` });
-  }
-
-  try {
-    // Call the OpenAI API
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, // Make sure to use process.env to access environment variables
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: "gpt-3.5-turbo",
-        messages: messages,
-      }),
-    });
-
-    // Parse the JSON response
-    const data = await response.json();
-
-    // Error handling if the expected data is not returned
-    if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
-      throw new Error("Unexpected response from OpenAI");
+async function askGPT(userMessage, context, sessionChatHistory) {
+    console.log("askGPT function called with message: ", userMessage);
+    if (context) {
+        console.log("Context provided for GPT: ", context.substring(0, 50) + "...");
     }
 
-    // Extract the GPT-3 response
-    const gptResponseContent = data.choices[0].message.content;
-    
-    // After successfully getting a response, append GPT's response to the session chat history
-    sessionChatHistory.push({ role: "assistant", content: gptResponseContent });
+    sessionChatHistory.unshift({ role: "system", content: `Here's a matched document excerpt: ${context}` });
 
-    // Return the GPT-3 response content
-    return gptResponseContent;
-  } catch (error) {
-    console.error("Error in askGPT function:", error);
-    // Rethrow the error to be handled by the caller
-    throw error;
-  }
-};
+    const formattedSessionChatHistory = sessionChatHistory.map(chatMessage => ({
+        role: chatMessage.role,
+        content: chatMessage.message || chatMessage.content // Ensure compatibility with both 'message' and 'content' keys
+    }));
 
-module.exports = askGPT; // Export the function if this is in a module
+    console.log("Formatted chat history for GPT: ", JSON.stringify(formattedSessionChatHistory, null, 2));
 
+    try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model: "gpt-3.5-turbo",
+                messages: formattedSessionChatHistory,
+            }),
+        });
 
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`API responded with status ${response.status}: ${errorBody}`);
+            throw new Error(`API responded with status ${response.status}`);
+        }
 
+        const data = await response.json();
+
+        if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0].message) {
+            console.error("Unexpected response structure from OpenAI:", data);
+            throw new Error("Unexpected response structure from OpenAI");
+        }
+
+        const gptResponseContent = data.choices[0].message.content;
+        console.log("GPT response: ", gptResponseContent);
+        return gptResponseContent;
+    } catch (error) {
+        console.error("Error in askGPT function:", error);
+        throw error;
+    }
+}
 
 app.listen(3000, () => {
     console.log('Server started on http://localhost:3000');
