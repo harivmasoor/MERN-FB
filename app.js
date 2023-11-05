@@ -19,7 +19,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
 const createEmbeddings = async (text) => {
-    console.log("Text passed to createEmbeddings:", text);
+    // console.log("Text passed to createEmbeddings:", text);
     const body = {
         model: "text-embedding-ada-002",
         input: text
@@ -80,7 +80,7 @@ app.post('/', upload.array('pdf', 12), async (req, res) => {
 
     const promises = req.files.map(async (file) => {
         const text = await pdf(file.buffer);
-        console.log("Extracted text from PDF:", text.text);  // Log the extracted text
+        // console.log("Extracted text from PDF:", text.text);  // Log the extracted text
         const embedding = await createEmbeddings(text.text);                
         const docId = uuidv4();
         return {
@@ -169,7 +169,7 @@ app.post('/chat', async (req, res) => {
         }
 
         const embedding = await createEmbeddings(userMessage);
-        client = await MongoClient.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+        client = await MongoClient.connect(MONGO_URI);
         const db = client.db(DATABASE_NAME);
         const pdfsCollection = db.collection('pdfs');
         const chatHistoryCollection = db.collection('chatSessions');
@@ -191,7 +191,7 @@ app.post('/chat', async (req, res) => {
 
         documents.forEach((doc) => {
             const similarity = cosineSimilarity(embedding, doc.embedding);
-            if (similarity > 0.8) {
+            if (similarity > 0.95) {
                 combinedContext += doc.full_text + ' ';
                 contextAndScores.push({ text: doc.full_text, score: similarity });
             }
@@ -224,6 +224,7 @@ app.post('/chat', async (req, res) => {
         await chatHistoryCollection.insertOne(chatEntry);
 
         req.session.chatHistory.push({ role: 'user', message: userMessage }, { role: 'assistant', message: gptResponse });
+
 
         res.json({ response: gptResponse, chatHistory: req.session.chatHistory });
 
