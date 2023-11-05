@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat with GPT-3</title>
+    <style>
+        #chat-box {
+            border: 1px solid black;
+            padding: 10px;
+            height: 400px;
+            overflow-y: scroll;
+        }
+        textarea {
+            width: 100%;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <form action="/" method="post" enctype="multipart/form-data">
+        Upload a PDF: <input type="file" name="pdf" multiple><br><br>
+        <input type="submit" value="Upload and Embed">
+    </form>
+    <br>
+    <form action="/search" method="post" id="search-form">
+        Search in PDFs: <input type="text" name="query">
+        <button type="submit">Search</button>
+    </form>
+    <div id="chat-box">
+        <div id="chat-history">
+            <!-- chat history content will be dynamically added here using JavaScript -->
+        </div>
+        <form action="/chat" method="post" id="chat-form">
+            <textarea name="message" placeholder="Type your message here..."></textarea>
+            <button type="submit">Send</button>
+        </form>
+    </div>
+
+    <script>
+        const chatForm = document.getElementById("chat-form");
+        const chatHistory = document.getElementById("chat-history");
+
+        chatForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const formData = new FormData(chatForm);
+    const userMessage = formData.get("message");
+    
+    const response = await fetch("/chat", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json", // Set header to JSON
+        },
+        body: JSON.stringify({ message: userMessage }) // Convert data to JSON
+    });
+    const data = await response.json();
+
+    const gptResponse = `<p>GPT: ${data.response}</p>`;
+    
+    chatHistory.innerHTML += `<p>User: ${userMessage}</p>` + gptResponse;
+});
+</script>
+</body>
+</html>
+
